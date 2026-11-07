@@ -1,0 +1,5 @@
+node_modules/
+.agent-state.json
+.agent-state.tmp
+.runtime.lock
+.runtime.lock.recovery

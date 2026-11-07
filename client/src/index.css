@@ -1,0 +1,49 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap');
+
+:root {
+  font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  color: #18243b;
+  background: #f6f8fc;
+  font-synthesis: none;
+  font-weight: 400;
+  --blue: #2155f5;
+  --blue-dark: #1640c9;
+  --blue-soft: #edf3ff;
+  --text-muted: #66748b;
+  --border: #e5eaf2;
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+html { scroll-behavior: smooth; scroll-padding-top: 24px; }
+button, input, select { font: inherit; border-radius: 10px; }
+button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 44px; background: var(--blue); color: white; border: 1px solid transparent;
+  padding: 11px 17px; font-size: 13px; font-weight: 700; cursor: pointer;
+  transition: background .16s, box-shadow .16s;
+}
+button:hover:not(:disabled) { background: var(--blue-dark); box-shadow: 0 3px 10px #2155f51a; }
+button:disabled { opacity: .48; cursor: not-allowed; }
+input, select {
+  background: white; color: #18243b; border: 1px solid #dce3ee;
+  padding: 12px 14px; width: 100%; min-width: 0; min-height: 46px; font-size: 13px;
+  transition: border-color .16s, box-shadow .16s;
+}
+input::placeholder { color: #8a96a9; }
+input:hover, select:hover { border-color: #b3c3df; }
+input:focus, select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px #2155f512; outline: none; }
+button:focus-visible, a:focus-visible, summary:focus-visible { outline: 3px solid #97b4ff; outline-offset: 3px; }
+label { font-size: 12px; font-weight: 500; color: #56647b; display: grid; gap: 8px; }
+a { color: inherit; text-decoration: none; }
+small { font-size: 12px; }
+h1, h2, h3, p { margin-top: 0; }
+h1, h2, h3 { font-family: Manrope, -apple-system, BlinkMacSystemFont, sans-serif; }
+h1 { font-size: clamp(25px, 2.4vw, 32px); font-weight: 800; letter-spacing: -1.1px; margin-bottom: 7px; }
+h2 { font-size: 17px; letter-spacing: -.4px; font-weight: 800; }
+h3 { font-size: 15px; font-weight: 700; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+::selection { background: #dce7ff; color: #1238a6; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { transition: none !important; }
+}

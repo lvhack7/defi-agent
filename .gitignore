@@ -1,0 +1,8 @@
+.env*
+!.env.example
+**/node_modules/
+**/dist/
+agent/.agent-state.json
+agent/.agent-state.tmp
+agent/.runtime.lock
+blockchain/.trades/

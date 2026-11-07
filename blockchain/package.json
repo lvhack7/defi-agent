@@ -1,0 +1,14 @@
+{
+  "name": "defi-autopilot-blockchain",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test *.test.mts"
+  },
+  "dependencies": {
+    "viem": "2.57.16"
+  }
+}
