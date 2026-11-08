@@ -1,18 +1,22 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import './App.css'
 import { Icon } from './Icon'
 import { TokenIcon } from './TokenIcon'
 import { dashboardContext } from './chat-context'
 import { AgentResponse } from './AgentResponse'
 import { SwapCalculator } from './SwapCalculator'
+import { Brand } from './Brand'
+import { CryptoIcon } from './CryptoIcon'
+import { LandingPage } from './LandingPage'
+import { TradeCard } from './TradeCard'
+import type { Trade } from './trade'
+import type { SwapRequest } from './swap-preview'
 
 import { extensionProvider, mobileProvider, type WalletProvider } from './wallet'
 import { supportsSigning, describeWalletPermissions, requestNetworkAccess, pairForNetwork } from './wallet-session'
 
 type Network = 'base' | 'mainnet' | 'sepolia'
 const networks = {base:{id:8453,name:'Base Mainnet',explorer:'https://basescan.org'},mainnet:{id:1,name:'Ethereum Mainnet',explorer:'https://etherscan.io'},sepolia:{id:11155111,name:'Ethereum Sepolia',explorer:'https://sepolia.etherscan.io'}}
-type Check = { name: string; passed: boolean; explanation: string }
-type Trade = { input?: {network?: Network}; id: string; status: string; hash?: string; validation: { executionEnabled?: boolean; network?: Network; transaction?: {chainId:number}; checks: Check[]; message: string; economics?: {quotedEthPercent: number; quotedUsdcPercent: number}; quote?: {amountIn: string; amountOut: string; tokenIn: string; tokenOut: string}; minimumOut?: string; kind?: string }; result?: {inputVerified?:boolean;outputVerified?:boolean;balancesVerified?:boolean;confirmations?:number;blockNumber?:string;portfolio?:{native:{balance:string};tokens:{balance?:string}[]};usdcReceivedRaw: string; receiptStatus: string} }
 type Portfolio = { pricing?: {source:string;currency:string;ethUsd:string|null;usdcUsd:string|null;usdcPerEth:string;observedAt:string}; portfolio: {native: {balance: string}; tokens: {balance?: string; error?: string}[]}; valuation?: {currency:string;total: string; assets: {asset: string; allocationPercent: number|null; valueUsdc: string}[]}; valuationError?: string; spot?: {usdcPerEth: string; feeTier: number; blockNumber: string; pool: string} }
 // Display formatting only; transaction amounts retain their original precision.
 function displayNumber(value: string | null | undefined, decimals = 2) {
@@ -22,13 +26,15 @@ function displayNumber(value: string | null | undefined, decimals = 2) {
 async function api(path: string, body?: unknown) {
   const response = await fetch('/api/' + path, body === undefined ? undefined : {method: 'POST', headers: {'content-type':'application/json', 'x-defi-ui':'1'}, body: JSON.stringify(body)})
   const data = await response.json()
-  if (!response.ok) throw new Error(data.error ?? 'Request failed')
+  if (!response.ok) throw Object.assign(new Error(data.error ?? 'Request failed'), {code:data.code})
   return data
 }
-function App() {
+function Dashboard() {
+  const chatInput = useRef<HTMLInputElement>(null)
+  const [activeSection, setActiveSection] = useState('overview')
   const [network, setNetwork] = useState<Network>('base')
   const chainId = networks[network].id
-  const [config, setConfig] = useState<{network:Network;executionEnabled:boolean;rpcConfigured:boolean;maxTradeUsd:string;maxGasUsd:string}[]>([])
+  const [config, setConfig] = useState<{network:Network;executionEnabled:boolean;rpcConfigured:boolean;maxTradeUsd:string;maxGasUsd:string;walletDeadlineSeconds?:number}[]>([])
   const activeConfig = config.find(c=>c.network===network)
   const [wallet, setWallet] = useState('')
   const [connected, setConnected] = useState('')
@@ -37,14 +43,21 @@ function App() {
   const [networkSigning, setNetworkSigning] = useState(false)
   const [portfolio, setPortfolio] = useState<Portfolio>()
   const [trades, setTrades] = useState<Trade[]>([])
+  const [allowanceRevision, setAllowanceRevision] = useState(0)
+  const [focusedTrade, setFocusedTrade] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [proposalNotice, setProposalNotice] = useState('')
   const [message, setMessage] = useState('')
   const [conversation, setConversation] = useState<{role: string; text: string}[]>([])
   const [activity, setActivity] = useState<string[]>([])
   const [chatProgress, setChatProgress] = useState({stage:'Connecting to agent', elapsedSeconds:0})
   const [hashes, setHashes] = useState<Record<string,string>>(() => JSON.parse(localStorage.getItem('defi-pending-hashes') ?? '{}'))
-  const refreshTrades = async () => setTrades(await api('trades'))
+  const refreshTrades = async () => { setTrades(await api('trades')); setAllowanceRevision(value=>value+1) }
+  useEffect(()=>{
+    if (!focusedTrade) return
+    document.getElementById('trade-'+focusedTrade)?.scrollIntoView({block:'nearest'})
+  },[focusedTrade,trades])
   useEffect(() => { refreshTrades().catch(() => {}); api('config').then(setConfig).catch(()=>{}) }, [])
   useEffect(()=>{setPortfolio(undefined);setNetworkSigning(connectionKind === 'extension' || supportsSigning(provider?.session, chainId))},[network,chainId,provider,connectionKind])
   async function run(fn: () => Promise<void>) { setBusy(true); setError(''); try { await fn() } catch(e) { setError(e instanceof Error ? e.message : 'Action failed') } finally { setBusy(false) } }
@@ -91,7 +104,39 @@ function App() {
     if (Number(chain) !== chainId) await provider.request({method:'wallet_switchEthereumChain', params:[{chainId:`0x${chainId.toString(16)}`}]})
     if (Number(await provider.request({method:'eth_chainId'})) !== chainId) throw new Error('Select the requested network in Trust Wallet')
   }
+  async function refreshProposal(trade: Trade) {
+    if (!connected) throw new Error('Connect the proposal wallet to refresh it')
+    const updated: Trade = await api('refresh-proposal', {id:trade.id, wallet:connected})
+    await refreshTrades()
+    setFocusedTrade(updated.id)
+    setProposalNotice(updated.status === 'prepared'
+      ? `Quote refreshed. Review the updated output, minimum received, and fees, then select Review & sign again. No wallet signature was requested.`
+      : 'Updated validation rejected this swap. See the new proposal checks; no wallet signature was requested.')
+  }
+  async function prepareSwap(input: SwapRequest, approvalOnly = false) {
+    const updated: Trade = await api('prepare', {wallet:connected || wallet,...input,...(approvalOnly ? {approvalOnly:true} : {})})
+    await refreshTrades(); setFocusedTrade(updated.id)
+    setProposalNotice(updated.status === 'rejected' ? updated.validation.message : approvalOnly
+      ? 'Step 1: review USDC spending approval. After it confirms, continue to review and sign the separate swap.'
+      : 'Review the swap terms, then sign in Trust Wallet.')
+  }
+  async function continueApproval(trade: Trade) {
+    if (!connected || (trade.input?.network ?? 'sepolia') !== network) throw new Error('Connect the approval wallet on the selected network')
+    const updated: Trade = await api('continue-approval', {id:trade.id,wallet:connected})
+    await refreshTrades(); setFocusedTrade(updated.id)
+    setProposalNotice(updated.status === 'prepared' ? 'Step 2: review this separate USDC → ETH swap, then sign it in Trust Wallet.' : updated.validation.message)
+  }
+  async function verifyReceipt(trade: Trade, hash: string | undefined) {
+    if (!hash) throw new Error('Enter the transaction hash first')
+    const updated: Trade = await api('receipt', {id:trade.id,hash})
+    await refreshTrades()
+    if (updated.validation.kind === 'usdc_approval' && updated.status === 'confirmed') {
+      setFocusedTrade(updated.id)
+      setProposalNotice('USDC approval confirmed. Use “Review USDC → ETH swap” on the approval card to continue. The swap requires a separate wallet confirmation.')
+    }
+  }
   async function approve(trade: Trade) {
+    setProposalNotice('')
     if (!provider) throw new Error('Connect a wallet before signing')
     const targetChain = trade.validation.transaction?.chainId
     if (targetChain !== chainId) throw new Error('Proposal network differs from selected network')
@@ -102,8 +147,15 @@ function App() {
     const chain = await provider.request({method:'eth_chainId'})
     if (Number(chain) !== chainId) await provider.request({method:'wallet_switchEthereumChain', params:[{chainId:`0x${chainId.toString(16)}`}]})
     if (Number(await provider.request({method:'eth_chainId'})) !== chainId) throw new Error('Wallet must be on the selected network')
-    const {expiresAt, chainId: preparedChainId, ...tx} = await api('signature', {id: trade.id, wallet: connected})
+    let signature
+    try { signature = await api('signature', {id:trade.id, wallet:connected}) }
+    catch (error) {
+      if ((error as {code?:string}).code === 'proposal_refresh_required') { await refreshProposal(trade); return }
+      throw error
+    }
+    const {expiresAt, chainId: preparedChainId, ...tx} = signature
     if (preparedChainId !== chainId || Date.now() >= expiresAt) throw new Error('Transaction expired or wrong network')
+    await refreshTrades().catch(()=>{})
     let hash: string
     try { hash = await provider.request({method:'eth_sendTransaction', params:[{...tx, chainId:`0x${chainId.toString(16)}`}]}) as string }
     catch(e) {
@@ -112,7 +164,7 @@ function App() {
       throw new Error((e as {code?: number}).code === 4001 ? 'Transaction declined in Trust Wallet' : 'Wallet response uncertain. Inspect Trust Wallet before submitting any new proposal.')
     }
     const pending = {...hashes, [trade.id]: hash}; setHashes(pending); localStorage.setItem('defi-pending-hashes', JSON.stringify(pending))
-    await api('receipt', {id: trade.id, hash}); await refreshTrades()
+    await verifyReceipt(trade, hash)
   }
   async function enableNetwork() {
     if (!provider) throw new Error('Connect your mobile wallet first')
@@ -164,9 +216,10 @@ function App() {
   }
   const ethPercent = portfolio?.valuation?.assets[0]?.allocationPercent ?? 0
   return <div className="shell">
-    <aside><a className="brand" href="/"><span className="brand-mark"><Icon name="agent"/></span><span className="brand-name">DeFi Autopilot</span></a><a className="nav active" href="#overview"><Icon name="overview"/> Overview</a><a className="nav" href="#agent"><Icon name="agent"/> Agent</a><a className="nav" href="#trades"><Icon name="swap"/> Swaps</a><div className="sidebar-bottom"><span className="dot"/> {networks[network].name}</div></aside>
-    <main><header><div><h1>Portfolio</h1></div><div className="wallet-actions">{connected ? <><span>{connected.slice(0,6)}…{connected.slice(-4)}</span><button className="secondary" disabled={busy} onClick={()=>run(async()=>{await provider?.disconnect?.();setProvider(undefined);setConnected('');setWallet('');setConnectionKind('');setNetworkSigning(false)})}>Disconnect</button></> : <><button disabled={busy} onClick={()=>run(()=>connect('mobile'))}>Connect wallet</button><button className="secondary" disabled={busy} onClick={()=>run(()=>connect('extension'))}>Use extension</button></>}</div></header>
-    <div className="notice network-notice"><label>Network<select disabled={busy} value={network} onChange={e=>setNetwork(e.target.value as Network)}><option value="base">Base Mainnet</option><option value="mainnet">Ethereum Mainnet</option><option value="sepolia">Ethereum Sepolia · testnet</option></select></label><span className="execution-status"><Icon name="lock"/>{activeConfig?.executionEnabled ? 'Wallet approval required' : 'Trading locked'}</span></div>
+    <a className="skip-link" href="#overview">Skip to portfolio</a>
+    <aside><Brand/><nav aria-label="Dashboard navigation">{(['overview','agent','trades'] as const).map(section=><a key={section} className={'nav '+(activeSection===section?'active':'')} href={'#'+section} aria-current={activeSection===section?'location':undefined} onClick={()=>setActiveSection(section)}><Icon name={section==='trades'?'swap':section}/>{section==='overview'?'Overview':section==='agent'?'Agent':'Swaps'}{section==='agent'&&<span className="nav-agent-badge">AI</span>}</a>)}</nav><div className="sidebar-bottom"><CryptoIcon name={network==='base'?'base':'ethereum'}/><span>{networks[network].name}<small>{network==='sepolia'?'Test network':'Mainnet'}</small></span></div></aside>
+    <main><header><div className="dashboard-heading"><span className="dashboard-kicker">YOUR DEFI WORKSPACE</span><h1>Portfolio</h1></div><div className="wallet-actions">{connected ? <><span>{connected.slice(0,6)}…{connected.slice(-4)}</span><button className="secondary" disabled={busy} onClick={()=>run(async()=>{await provider?.disconnect?.();setProvider(undefined);setConnected('');setWallet('');setConnectionKind('');setNetworkSigning(false)})}>Disconnect</button></> : <><button disabled={busy} onClick={()=>run(()=>connect('mobile'))}><Icon name="wallet"/> Connect wallet</button><button className="secondary" disabled={busy} onClick={()=>run(()=>connect('extension'))}>Use extension</button></>}</div></header>
+    <div className="notice network-notice"><div className="network-picker"><CryptoIcon name={network==='base'?'base':'ethereum'}/><label><span className="visually-hidden">Network</span><select disabled={busy} value={network} onChange={e=>setNetwork(e.target.value as Network)}><option value="base">Base Mainnet</option><option value="mainnet">Ethereum Mainnet</option><option value="sepolia">Ethereum Sepolia · testnet</option></select></label></div><span className="execution-status"><Icon name="lock"/>{activeConfig?.executionEnabled ? 'Wallet approval required' : 'Trading locked'}</span></div>
     {activeConfig && !activeConfig.rpcConfigured && <div className="error">RPC is not configured for {networks[network].name}. Set its backend RPC URL and restart.</div>}
     {error && <div role="alert" className="error">{error}</div>}
     {connected && connectionKind === 'mobile' && !networkSigning && <div className="notice session-notice"><span>Approve this network in your wallet to trade.</span><button disabled={busy} onClick={()=>run(enableNetwork)}>Request {networks[network].name} access</button><button className="secondary" disabled={busy} onClick={()=>run(reconnectSelectedNetwork)}>Pair again for {networks[network].name}</button></div>}
@@ -174,15 +227,18 @@ function App() {
     <section className="metrics">
       <article>
         <div className="metric-heading"><p>Portfolio value</p><span className="metric-symbol"><Icon name="wallet"/></span></div>
-        <strong title={portfolio?.valuation?.total}>{displayNumber(portfolio?.valuation?.total)}$ <small>{portfolio?.valuation?.currency ?? (network === 'sepolia' ? 'test USDC' : 'USD')}</small></strong>
+        <strong title={portfolio?.valuation?.total}>{portfolio?.valuation && network!=='sepolia' ? '$' : ''}{displayNumber(portfolio?.valuation?.total)} <small>{portfolio?.valuation?.currency ?? (network === 'sepolia' ? 'test USDC' : 'USD')}</small></strong>
+        <span className="metric-caption">ETH + USDC</span>
       </article>
       <article>
         <div className="metric-heading token-heading"><TokenIcon token="ETH"/><p>ETH</p></div>
         <strong title={portfolio?.portfolio.native.balance}>{displayNumber(portfolio?.portfolio.native.balance, 8)}</strong>
+        <span className="metric-caption">Ethereum</span>
       </article>
       <article>
         <div className="metric-heading token-heading"><TokenIcon token="USDC"/><p>USDC</p></div>
         <strong title={portfolio?.portfolio.tokens[0]?.balance}>{displayNumber(portfolio?.portfolio.tokens[0]?.balance, 6)}</strong>
+        <span className="metric-caption">USD Coin</span>
       </article>
     </section>
     <section className="two-col">
@@ -199,11 +255,14 @@ function App() {
         <p className="market-details">{network === 'sepolia' ? `Fee tier ${portfolio?.spot?.feeTier ? portfolio.spot.feeTier/10000+'%' : '—'} · Block ${portfolio?.spot?.blockNumber ?? '—'}` : `USDC / USD ${displayNumber(portfolio?.pricing?.usdcUsd, 4)} · Updated ${portfolio?.pricing?.observedAt ? new Date(portfolio.pricing.observedAt).toLocaleTimeString() : '—'}`}</p>
       </article>
     </section>
-    <section id="agent" className="panel"><div className="panel-title"><h2>Agent</h2></div><div className="chat">{conversation.length ? conversation.map((row,i)=><div className={'chat-row '+row.role} key={i}><small>{row.role}</small>{row.role === 'Agent' && row.text ? <AgentResponse text={row.text}/> : <p>{row.text || `${chatProgress.stage}… ${chatProgress.elapsedSeconds}s`}</p>}</div>) : <div className="chat-empty"><Icon name="agent"/>What would you like to do?</div>}</div><form onSubmit={e=>{e.preventDefault();run(chat)}}><input aria-label="Message to agent" value={message} onChange={e=>setMessage(e.target.value)} placeholder="How much ETH do I have, and what is it worth?"/><button disabled={busy}>Send ↗</button></form>{activity.length>0&&<details><summary>Live tool activity · {activity.length} events</summary><pre>{activity.join('\n')}</pre></details>}</section>
-    <section id="trades" className="panel"><div className="panel-title"><h2>Swaps</h2><button className="secondary" disabled={busy} onClick={()=>run(refreshTrades)}>Refresh</button></div><SwapCalculator network={network} wallet={connected || wallet} busy={busy} onReview={input => run(async()=>{await api('prepare',{wallet:connected || wallet,...input});await refreshTrades()})} onApproval={input => run(async()=>{await api('prepare',{wallet:connected || wallet,...input,approvalOnly:true});await refreshTrades()})}/>
+    <div className="workspace-grid">
+    <section id="agent" className="panel agent-panel"><div className="panel-title"><h2 className="section-icon-title"><span className="section-icon"><Icon name="agent"/></span>Your agent</h2><span>ZOOWORK</span></div><div className="chat">{conversation.length ? conversation.map((row,i)=><div className={'chat-row '+row.role} key={i}><small>{row.role}</small>{row.role === 'Agent' && row.text ? <AgentResponse text={row.text}/> : <p>{row.text || `${chatProgress.stage}… ${chatProgress.elapsedSeconds}s`}</p>}</div>) : <div className="chat-empty"><span className="chat-empty-mark"><Icon name="agent"/></span><h3>What’s your next move?</h3><p>Ask about your portfolio or calculate a swap.</p><div className="prompt-suggestions">{['What is my ETH worth?','Calculate 0.001 ETH to USDC','Show my balances'].map(prompt=><button type="button" className="secondary" disabled={busy} key={prompt} onClick={()=>{setMessage(prompt);chatInput.current?.focus()}}>{prompt}<Icon name="arrow"/></button>)}</div></div>}</div><form className="agent-composer" onSubmit={e=>{e.preventDefault();run(chat)}}><input ref={chatInput} aria-label="Message to agent" value={message} onChange={e=>setMessage(e.target.value)} placeholder="Ask your agent…"/><button disabled={busy||!message.trim()} aria-label="Send message"><Icon name="arrow"/></button></form>{activity.length>0&&<details><summary>Live tool activity · {activity.length} events</summary><pre>{activity.join('\n')}</pre></details>}</section>
+    <section id="trades" className="panel swaps-panel">{proposalNotice&&<p className="proposal-notice" role="status">{proposalNotice}</p>}<div className="panel-title"><h2 className="section-icon-title"><span className="section-icon"><Icon name="swap"/></span>Swap</h2><span className="protocol-label"><CryptoIcon name="uniswap"/> Uniswap v3</span><button className="secondary refresh-trades" aria-label="Refresh swap proposals" title="Refresh proposals" disabled={busy} onClick={()=>run(refreshTrades)}><Icon name="refresh"/></button></div><SwapCalculator network={network} wallet={connected || wallet} busy={busy} allowanceRevision={allowanceRevision} onReview={input => run(()=>prepareSwap(input))} onApproval={input => run(()=>prepareSwap(input,true))}/>
     <details className="policy-details"><summary>Trade limits</summary><p>Mainnet: ${activeConfig?.maxTradeUsd ?? '100'} per swap, ${activeConfig?.maxGasUsd ?? '5'} estimated gas. Fresh validation before signing. USDC → ETH requires an allowance approval first.</p></details>
-    {trades.length===0&&<p className="empty">No swaps yet.</p>}{trades.filter(trade=>(trade.input?.network ?? 'sepolia')===network).map(trade=><div className="trade" key={trade.id}><div className="panel-title"><h3>{trade.validation.quote ? trade.validation.kind === 'usdc_approval' ? `Approve ${trade.validation.quote.amountIn} USDC allowance` : `${trade.validation.quote.amountIn} ${trade.validation.quote.tokenIn} → ${trade.validation.quote.amountOut} ${trade.validation.quote.tokenOut}` : 'Swap proposal'}</h3><span className={'badge '+trade.status}>{trade.status.replace('_',' ')}</span></div><p className="muted">{trade.id.slice(0,12)} · Minimum output {trade.validation.minimumOut ?? '—'} {trade.validation.quote?.tokenOut ?? 'USDC'}</p>{trade.validation.economics&&<p>Expected allocation {trade.validation.economics.quotedEthPercent}% ETH / {trade.validation.economics.quotedUsdcPercent}% USDC</p>}<details><summary>Validation checks</summary>{trade.validation.checks.map((check,i)=><p key={i} className={check.passed?'pass':'fail'}>{check.passed?'✓':'×'} {check.name}: {check.explanation}</p>)}</details>{trade.status==='prepared'&&!trade.validation.executionEnabled&&<p className="muted">Validated · trading locked</p>}{trade.result&&<details><summary>On-chain verification · {trade.result.confirmations ?? 0} confirmations</summary><p>Receipt: {trade.result.receiptStatus} · Block {trade.result.blockNumber ?? '—'}</p><p>Swap input {trade.result.inputVerified?'verified':'unverified'} · Output {trade.result.outputVerified?'verified':'unverified'} · Balances {trade.result.balancesVerified?'verified':'pending'}</p>{trade.result.portfolio&&<p>After transaction block: {trade.result.portfolio.native.balance} ETH / {trade.result.portfolio.tokens[0]?.balance ?? 'unavailable'} USDC</p>}</details>}{trade.status==='prepared'&&<button disabled={busy||!connected||!networkSigning||!activeConfig?.executionEnabled||!trade.validation.executionEnabled} onClick={()=>run(()=>approve(trade))}>Review & sign in Trust Wallet</button>}{trade.status==='awaiting_wallet'&&!hashes[trade.id]&&<p className="muted">Inspect Trust Wallet for a pending or submitted transaction. If submitted, paste its hash to recover tracking.</p>}{['awaiting_wallet','submitted','verification_pending','verification_failed'].includes(trade.status)&&<form onSubmit={e=>{e.preventDefault();run(async()=>{await api('receipt',{id:trade.id,hash:hashes[trade.id]??trade.hash});await refreshTrades()})}}><input aria-label="Transaction hash" placeholder="0x transaction hash" value={hashes[trade.id]??trade.hash??''} onChange={e=>setHashes(h=>({...h,[trade.id]:e.target.value}))}/><button disabled={busy}>Verify receipt</button></form>}{trade.hash&&<a target="_blank" rel="noreferrer" href={`${networks[network].explorer}/tx/${trade.hash}`}>View transaction ↗</a>}</div>)}
-    </section></main>
+    {trades.length===0&&<p className="empty">No swaps yet.</p>}{trades.filter(trade=>(trade.input?.network ?? 'sepolia')===network).map(trade=><TradeCard key={trade.id} trade={trade} busy={busy} connected={connected} canSign={Boolean(connected&&networkSigning&&activeConfig?.executionEnabled)} explorer={networks[network].explorer} walletDeadlineSeconds={activeConfig?.walletDeadlineSeconds ?? 300} pendingHash={hashes[trade.id]} onSign={()=>run(()=>approve(trade))} onRefresh={()=>run(()=>refreshProposal(trade))} onContinue={()=>run(()=>continueApproval(trade))} onHashChange={hash=>setHashes(h=>({...h,[trade.id]:hash}))} onVerify={()=>run(()=>verifyReceipt(trade,hashes[trade.id]??trade.hash))}/>)}
+    </section></div><footer className="dashboard-footer"><span>DeFi Autopilot</span><span><Icon name="lock"/> Transactions require your wallet approval</span></footer></main>
   </div>
 }
-export default App
+export default function App() {
+  return window.location.pathname.replace(/\/+$/, '') === '/dashboard' ? <Dashboard/> : <LandingPage/>
+}

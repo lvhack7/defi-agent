@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { unlink } from 'node:fs/promises';
+import { unlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { decodeFunctionData, encodeFunctionResult, encodeEventTopics, encodeAbiParameters, parseAbi, zeroAddress } from 'viem';
 import { validateUsdcSwap } from './reverse-validation.mts';
 import { validateSwap } from './validation.mts';
 import { isFullInputQuote } from './uniswap.mts';
-import { prepareTrade, requestSignature, recordTransaction } from './execution.mts';
+import { prepareTrade, requestSignature, recordTransaction, refreshTrade, getTrade, prepareAfterApproval, ProposalRefreshRequired } from './execution.mts';
 const wallet = '0x4259e3c12Bc0ceB7345E38F88809a02Ff83cF502';
 test('full-input detection excludes both price limits', () => {
   assert.equal(isFullInputQuote(4295128740n), false);
@@ -23,7 +23,7 @@ test('rejected proposal is persisted idempotently and cannot be signed or tracke
     await assert.rejects(recordTransaction(id, `0x${'1'.repeat(64)}`));
   } finally { if (id) await unlink(new URL(`./.trades/${id}.json`, import.meta.url)); }
 });
-test('a fully simulated in-policy swap can pass without broadcasting', async () => {
+test('validated swaps preserve reviewed terms across quote movement and refresh without broadcasting', async () => {
   const originalFetch = globalThis.fetch, originalRpc = process.env.SEPOLIA_RPC_URL;
   process.env.SEPOLIA_RPC_URL = 'https://rpc.example';
   const abi = parseAbi([
@@ -40,6 +40,7 @@ test('a fully simulated in-policy swap can pass without broadcasting', async () 
   const price = sqrt(2n ** 192n * 10n ** 12n / 2000n);
   let transactions = 0, reverse = false;
   let allowance = 0n;
+  let quoteOut = 1200000000n, expectedMinimum = 1194000000n;
   let txForRpc: {from:string;to:string;data:string;value:string}|undefined;
   let validLogs = false;
   globalThis.fetch = async (_url, init) => {
@@ -67,34 +68,72 @@ test('a fully simulated in-policy swap can pass without broadcasting', async () 
         case 'token1':result=encodeFunctionResult({abi,functionName:'token1',result:'0xfff9976782d46cc05630d1f6ebab18b2324d6b14'});break;
         case 'liquidity':result=encodeFunctionResult({abi,functionName:'liquidity',result:100000n});break;
         case 'slot0':result=encodeFunctionResult({abi,functionName:'slot0',result:[price,0,0,1,1,0,true]});break;
-        case 'quoteExactInputSingle':result=encodeFunctionResult({abi,functionName:'quoteExactInputSingle',result:[reverse?200000000000000000n:1200000000n,price,0,100000n]});break;
+        case 'quoteExactInputSingle':result=encodeFunctionResult({abi,functionName:'quoteExactInputSingle',result:[reverse?200000000000000000n:quoteOut,price,0,100000n]});break;
         case 'multicall':{
+          assert.equal(req.params[1],validLogs?'0x65':'0x64','router simulation must use the quoted block, not latest');
           const swap=decodeFunctionData({abi,data:decoded.args[1][0]});
           assert.equal(swap.functionName,'exactInputSingle');
-          if(swap.functionName==='exactInputSingle') { assert.equal(swap.args[0].recipient.toLowerCase(),reverse?'0x3bfa4769fb09eefc5a80d6e87c3b9c650f7ae48e':wallet.toLowerCase()); assert.equal(swap.args[0].amountOutMinimum,reverse?199000000000000000n:1194000000n); }
-          result=encodeFunctionResult({abi,functionName:'multicall',result:[encodeFunctionResult({abi,functionName:'exactInputSingle',result:reverse?200000000000000000n:1200000000n}),'0x']});break;
+          if(swap.functionName==='exactInputSingle') { assert.equal(swap.args[0].recipient.toLowerCase(),reverse?'0x3bfa4769fb09eefc5a80d6e87c3b9c650f7ae48e':wallet.toLowerCase()); assert.equal(swap.args[0].amountOutMinimum,reverse?199000000000000000n:expectedMinimum); }
+          result=encodeFunctionResult({abi,functionName:'multicall',result:[encodeFunctionResult({abi,functionName:'exactInputSingle',result:reverse?200000000000000000n:quoteOut}),'0x']});break;
         }
       }
     }
     if(result===undefined)throw new Error('Unexpected RPC '+req.method);
     return new Response(JSON.stringify({jsonrpc:'2.0',id:req.id,result}),{headers:{'content-type':'application/json'}});
   };
-  let id = '';
+  let id = ''; const createdIds: string[] = [];
   try {
     const validation = await validateSwap({wallet,amountEth:'0.6',slippageBps:50});
     assert.equal(validation.status,'approved',JSON.stringify(validation.checks));
     assert.ok('transaction' in validation && validation.transaction);
     const trade = await prepareTrade({wallet,amountEth:'0.6',slippageBps:50},randomUUID()); id=trade.id;
+    createdIds.push(id);
     assert.equal(trade.status,'prepared');
+    assert.ok('transaction' in trade.validation && trade.validation.transaction && trade.validation.transaction.expiresAt - Date.now() > 240000, 'wallet deadline is separate from 30-second quote freshness');
     await assert.rejects(requestSignature(id,'0x0000000000000000000000000000000000000002'));
+    // A user can review for over 30 seconds. Signing re-quotes and simulates;
+    // a small price move must retain the original floor, never lower it.
+    trade.createdAt = new Date(Date.now()-60000).toISOString();
+    if ('quote' in trade.validation) trade.validation.quote.quotedAt = new Date(Date.now()-60000).toISOString();
+    await writeFile(new URL(`./.trades/${id}.json`,import.meta.url),JSON.stringify(trade));
+    quoteOut = 1198800000n;
     const transaction=await requestSignature(id,wallet);
     assert.equal(transaction.chainId,11155111);
+    const signedValidation = (await getTrade(id)).validation;
+    assert.ok('minimumOut' in signedValidation);
+    assert.equal(signedValidation.minimumOut,'1194');
+    assert.ok(transaction.expiresAt-Date.now()>240000);
     await assert.rejects(requestSignature(id,wallet));
+    await assert.rejects(refreshTrade(id,wallet), /cannot be refreshed after wallet release/);
+    await assert.rejects(prepareAfterApproval(id,wallet), /confirmed USDC approval/);
     txForRpc=transaction;
     const hash=`0x${'1'.repeat(64)}` as const;
     assert.equal((await recordTransaction(id,hash)).status,'verification_failed');
     validLogs=true;
     assert.equal((await recordTransaction(id,hash)).status,'confirmed');
+    // Crossing the reviewed floor requires a replacement and another user click.
+    quoteOut = 1200000000n;
+    const moving = await prepareTrade({wallet,amountEth:'0.6',slippageBps:50},randomUUID());
+    createdIds.push(moving.id);
+    quoteOut = 1180000000n;
+    await assert.rejects(requestSignature(moving.id,wallet), ProposalRefreshRequired);
+    assert.equal((await getTrade(moving.id)).status,'prepared');
+    await assert.rejects(refreshTrade(moving.id,'0x0000000000000000000000000000000000000002'));
+    expectedMinimum = 1174100000n;
+    const replacement = await refreshTrade(moving.id,wallet);
+    createdIds.push(replacement.id);
+    assert.equal(replacement.status,'prepared',JSON.stringify(replacement.validation.checks));
+    assert.equal((await getTrade(moving.id)).status,'superseded');
+    assert.equal((await refreshTrade(moving.id,wallet)).id,replacement.id);
+    await assert.rejects(requestSignature(moving.id,wallet));
+    // Expired proposals are also refreshed without releasing a wallet request.
+    replacement.createdAt = new Date(Date.now()-301000).toISOString();
+    await writeFile(new URL(`./.trades/${replacement.id}.json`,import.meta.url),JSON.stringify(replacement));
+    await assert.rejects(requestSignature(replacement.id,wallet), ProposalRefreshRequired);
+    const renewed = await refreshTrade(replacement.id,wallet);
+    createdIds.push(renewed.id);
+    assert.equal(renewed.status,'prepared');
+    assert.equal((await getTrade(replacement.id)).status,'superseded');
     reverse=true;
     const missing=await validateUsdcSwap({wallet,amountUsdc:'400',slippageBps:50});
     assert.equal(missing.status,'rejected');
@@ -104,6 +143,23 @@ test('a fully simulated in-policy swap can pass without broadcasting', async () 
     allowance=400000000n;
     const reversed=await validateUsdcSwap({wallet,amountUsdc:'400',slippageBps:50});
     assert.equal(reversed.status,'approved',JSON.stringify(reversed.checks));
+    const approvalTrade=await prepareTrade({wallet,amountUsdc:'400',slippageBps:50,approvalOnly:true},randomUUID());
+    createdIds.push(approvalTrade.id);
+    assert.equal(approvalTrade.status,'prepared');
+    await assert.rejects(prepareAfterApproval(approvalTrade.id,wallet), /confirmed USDC approval/);
+    // The mocked receipt has confirmed approval, but no swap has been released.
+    approvalTrade.status='confirmed';
+    await writeFile(new URL(`./.trades/${approvalTrade.id}.json`,import.meta.url),JSON.stringify(approvalTrade));
+    await assert.rejects(prepareAfterApproval(approvalTrade.id,'0x0000000000000000000000000000000000000002'), /wallet does not match/);
+    const continued=await prepareAfterApproval(approvalTrade.id,wallet);
+    createdIds.push(continued.id);
+    assert.equal(continued.status,'prepared',JSON.stringify(continued.validation.checks));
+    assert.ok('kind' in continued.validation && continued.validation.kind==='swap');
+    assert.equal((continued.input as {amountUsdc:string}).amountUsdc,'400');
+    assert.equal('approvalOnly' in (continued.input as object),false);
+    assert.equal((await prepareAfterApproval(approvalTrade.id,wallet)).id,continued.id);
+    assert.equal((await getTrade(approvalTrade.id)).status,'confirmed');
+    assert.equal((await getTrade(continued.id)).status,'prepared','continuation cannot release a transaction to the wallet');
     assert.equal(transactions,0);
-  } finally { globalThis.fetch=originalFetch; if(originalRpc===undefined)delete process.env.SEPOLIA_RPC_URL;else process.env.SEPOLIA_RPC_URL=originalRpc; if(id)await unlink(new URL(`./.trades/${id}.json`,import.meta.url)); }
+  } finally { globalThis.fetch=originalFetch; if(originalRpc===undefined)delete process.env.SEPOLIA_RPC_URL;else process.env.SEPOLIA_RPC_URL=originalRpc; await Promise.all(createdIds.map(tradeId=>unlink(new URL(`./.trades/${tradeId}.json`,import.meta.url)))); }
 });

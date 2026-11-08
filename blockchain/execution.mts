@@ -1,18 +1,24 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, readdir } from 'node:fs/promises';
-import { createPublicClient, http, decodeEventLog, parseAbi, type Hex } from 'viem';
+import { createPublicClient, http, decodeEventLog, parseAbi, type Hex, type Address } from 'viem';
 import { networkConfig, networkName, networkFromChainId, rpcFor, executionEnabled } from './networks.mts';
 import { validateUsdcSwap } from './reverse-validation.mts';
 import { validateSwap } from './validation.mts';
 import { getPortfolio } from './portfolio.mts';
+import { policyFor } from './policy.mts';
+import type { ReviewedTerms } from './trade-validation.mts';
 const dir = new URL('./.trades/', import.meta.url);
 type Validation = Awaited<ReturnType<typeof validateSwap>> | Awaited<ReturnType<typeof validateUsdcSwap>>;
-async function assess(input: unknown) {
+async function assess(input: unknown, reviewed?: ReviewedTerms) {
   const v = input as Record<string, unknown>;
-  if (v && typeof v === 'object' && 'amountUsdc' in v) { const { approvalOnly, ...trade } = v; if (approvalOnly !== undefined && approvalOnly !== true) throw new Error('Invalid approval flag'); return validateUsdcSwap(trade, approvalOnly === true); }
-  return validateSwap(input);
+  if (v && typeof v === 'object' && 'amountUsdc' in v) { const { approvalOnly, ...trade } = v; if (approvalOnly !== undefined && approvalOnly !== true) throw new Error('Invalid approval flag'); return validateUsdcSwap(trade, approvalOnly === true, reviewed); }
+  return validateSwap(input, reviewed);
 }
-export type Trade = { id: string; createdAt: string; input: unknown; validation: Validation; status: 'rejected' | 'prepared' | 'awaiting_wallet' | 'submitted' | 'confirmed' | 'reverted' | 'wallet_declined' | 'verification_failed' | 'verification_pending'; hash?: Hex; result?: unknown };
+export type Trade = { id: string; createdAt: string; input: unknown; validation: Validation; status: 'rejected' | 'prepared' | 'superseded' | 'awaiting_wallet' | 'submitted' | 'confirmed' | 'reverted' | 'wallet_declined' | 'verification_failed' | 'verification_pending'; replacementId?: string; hash?: Hex; result?: unknown };
+export class ProposalRefreshRequired extends Error {
+  code = 'proposal_refresh_required';
+  constructor(message: string) { super(message); this.name = 'ProposalRefreshRequired'; }
+}
 const path = (id: string) => { if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Invalid trade ID'); return new URL(`${id}.json`, dir); };
 let queue = Promise.resolve();
 function serial<T>(fn: () => Promise<T>): Promise<T> { const result = queue.then(fn); queue = result.then(() => {}, () => {}); return result; }
@@ -28,8 +34,7 @@ export async function listTrades() {
   const trades = await Promise.all((await readdir(dir)).filter(x => x.endsWith('.json')).map(x => getTrade(x.slice(0, -5))));
   return trades.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
-export function prepareTrade(input: unknown, idempotencyKey: string = randomUUID()) {
-  return serial(async () => {
+async function buildTrade(input: unknown, idempotencyKey: string) {
     const id = createHash('sha256').update(idempotencyKey).digest('hex');
     try { return await getTrade(id); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Invalid trade input');
@@ -37,6 +42,35 @@ export function prepareTrade(input: unknown, idempotencyKey: string = randomUUID
     const validation = await assess(normalized);
     const trade: Trade = { id, createdAt: new Date().toISOString(), input: normalized, validation, status: validation.status === 'approved' && 'transaction' in validation && validation.transaction ? 'prepared' : 'rejected' };
     await save(trade); return trade;
+}
+export function prepareTrade(input: unknown, idempotencyKey: string = randomUUID()) {
+  return serial(() => buildTrade(input, idempotencyKey));
+}
+// An approval is not a swap. The explicit continuation creates a new validated
+// proposal for the same amount; it never requests or sends a wallet transaction.
+export function prepareAfterApproval(id: string, wallet: string) {
+  return serial(async () => {
+    const approval = await getTrade(id);
+    const input = approval.input as Record<string, unknown>;
+    if (typeof input.wallet !== 'string' || typeof wallet !== 'string' || input.wallet.toLowerCase() !== wallet.toLowerCase()) throw new Error('Connected wallet does not match approval');
+    if (approval.status !== 'confirmed' || !('kind' in approval.validation) || approval.validation.kind !== 'usdc_approval' || typeof input.amountUsdc !== 'string') throw new Error('This proposal requires a confirmed USDC approval before continuing');
+    const { approvalOnly: _approvalOnly, ...swap } = input;
+    return buildTrade(swap, `swap-after-approval:${id}`);
+  });
+}
+// Refresh only an unreleased proposal. The replacement must be reviewed and
+// signed separately; this action never releases a transaction to a wallet.
+export function refreshTrade(id: string, wallet: string) {
+  return serial(async () => {
+    const trade = await getTrade(id);
+    const input = trade.input as { wallet?: unknown };
+    if (typeof input.wallet !== 'string' || input.wallet.toLowerCase() !== wallet.toLowerCase()) throw new Error('Connected wallet does not match proposal');
+    if (trade.status === 'superseded' && trade.replacementId) return getTrade(trade.replacementId);
+    if (trade.status !== 'prepared') throw new Error('This proposal cannot be refreshed after wallet release; inspect its status first.');
+    const replacement = await buildTrade(trade.input, `refresh:${trade.id}`);
+    trade.status = 'superseded'; trade.replacementId = replacement.id;
+    await save(trade);
+    return replacement;
   });
 }
 // The agent cannot call this: it is the dashboard's explicit wallet-approval action.
@@ -48,12 +82,15 @@ export function requestSignature(id: string, wallet: string) {
     if (v.status !== 'approved' || !('transaction' in v) || !v.transaction) throw new Error('Validation did not pass');
     if (!executionEnabled(networkFromChainId(v.transaction.chainId))) throw new Error('Real-money execution is disabled for this network.');
     if (v.transaction.from.toLowerCase() !== wallet.toLowerCase()) throw new Error('Connected wallet does not match proposal');
-    if (Date.now() >= v.transaction.expiresAt) throw new Error('Proposal expired; request fresh validation.');
-    // Revalidate immediately before returning the exact transaction. Changed calldata needs a fresh proposal.
-    const fresh = await assess(trade.input);
-    if (fresh.status !== 'approved' || !('transaction' in fresh) || !fresh.transaction) throw new Error('Fresh validation rejected the swap; prepare a new proposal.');
+    const network = networkFromChainId(v.transaction.chainId);
+    if (!Number.isFinite(Date.parse(trade.createdAt)) || Date.now() - Date.parse(trade.createdAt) >= policyFor(network).maxProposalAgeMs || Date.now() >= v.transaction.expiresAt) throw new ProposalRefreshRequired('Proposal expired. Refresh and review the current terms.');
+    if (!('quote' in v) || !v.quote.pool || v.quote.feeTier === undefined || !('minimumOut' in v)) throw new Error('Validation did not include reviewed swap terms');
+    // Fresh quote and simulation, same input/route and exact reviewed minimum.
+    // Normal quote movement within that floor does not require re-approval.
+    const fresh = await assess(trade.input, { pool: v.quote.pool as Address, feeTier: v.quote.feeTier, minimumOut: v.minimumOut });
+    if (fresh.status !== 'approved' || !('transaction' in fresh) || !fresh.transaction) throw new ProposalRefreshRequired('Fresh validation requires an updated proposal for review.');
     if (!fresh.executionEnabled || fresh.transaction.chainId !== v.transaction.chainId || fresh.transaction.from.toLowerCase() !== v.transaction.from.toLowerCase() || fresh.transaction.to.toLowerCase() !== v.transaction.to.toLowerCase() || fresh.transaction.value !== v.transaction.value) throw new Error('Network, recipient or execution permissions changed');
-    if (!('quote' in v) || !('quote' in fresh) || fresh.quote.pool !== v.quote.pool || fresh.minimumOut !== v.minimumOut) throw new Error('Quote changed; prepare and review a new proposal.');
+    if (!('quote' in fresh) || fresh.quote.pool !== v.quote.pool || fresh.quote.feeTier !== v.quote.feeTier || fresh.minimumOut !== v.minimumOut) throw new ProposalRefreshRequired('Route or minimum output changed. Review an updated proposal.');
     if (!executionEnabled(networkFromChainId(fresh.transaction.chainId))) throw new Error('Execution was disabled during validation');
     trade.validation = fresh; trade.status = 'awaiting_wallet'; await save(trade);
     return fresh.transaction;

@@ -1,8 +1,10 @@
 import type { ReactNode } from 'react'
 
-type IconName = 'overview' | 'agent' | 'swap' | 'wallet' | 'lock' | 'refresh' | 'eth'
+type IconName = 'overview' | 'agent' | 'swap' | 'wallet' | 'lock' | 'refresh' | 'eth' | 'arrow' | 'check'
 
 const paths: Record<IconName, ReactNode> = {
+  arrow: <path d="M4 12h16m-6-6 6 6-6 6"/>,
+  check: <path d="m5 12 4 4L19 6"/>,
   overview: <><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></>,
   agent: <><path d="m12 3 2.7 6.3L21 12l-6.3 2.7L12 21l-2.7-6.3L3 12l6.3-2.7L12 3Z"/><path d="M20 2v4m-2-2h4"/></>,
   swap: <><path d="M4 7h15m-4-4 4 4-4 4M20 17H5m4-4-4 4 4 4"/></>,

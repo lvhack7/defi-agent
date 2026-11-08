@@ -16,7 +16,7 @@ function amountRaw(value: unknown, decimals: number): bigint {
   if (raw <= 0n || raw >= 2n ** 256n) throw new Error('Invalid amount: outside supported range');
   return raw;
 }
-export async function quoteSwap(input: unknown, rpcOverride?: string) {
+export async function quoteSwap(input: unknown, rpcOverride?: string, reviewedRoute?: { feeTier: number; pool: Address }) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Input must be an object');
   const value = input as Record<string, unknown>;
   if (Object.keys(value).some(k => !['tokenIn', 'amount', 'network'].includes(k))) throw new Error('Unknown input field');
@@ -31,8 +31,9 @@ export async function quoteSwap(input: unknown, rpcOverride?: string) {
   const blockNumber = await client.getBlockNumber();
   const addressIn = (tokenIn === 'ETH' ? WETH : USDC) as Address;
   const addressOut = (tokenIn === 'ETH' ? USDC : WETH) as Address;
-  const pools = await Promise.all(FEES.map(async fee => ({ fee, pool: await client.readContract({ address: FACTORY, abi: factoryAbi, functionName: 'getPool', args: [addressIn, addressOut, fee], blockNumber }) })));
-  const existing = pools.filter(row => row.pool !== zeroAddress);
+  const fees = reviewedRoute ? FEES.filter(fee => fee === reviewedRoute.feeTier) : FEES;
+  const pools = await Promise.all(fees.map(async fee => ({ fee, pool: await client.readContract({ address: FACTORY, abi: factoryAbi, functionName: 'getPool', args: [addressIn, addressOut, fee], blockNumber }) })));
+  const existing = pools.filter(row => row.pool !== zeroAddress && (!reviewedRoute || row.pool.toLowerCase() === reviewedRoute.pool.toLowerCase()));
   if (!existing.length) return { status: 'no_pool', network: config.network, blockNumber: blockNumber.toString(), tokenIn, tokenOut, amountIn: value.amount, message: 'No direct Uniswap v3 WETH/USDC pool exists at the checked fee tiers.' };
   const attempts = await Promise.all(existing.map(async row => {
     try {

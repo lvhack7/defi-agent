@@ -5,7 +5,8 @@ import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { analyzePortfolio } from '../blockchain/valuation.mts';
 import { calculateSwap } from '../blockchain/swap-calculator.mts';
-import { prepareTrade, listTrades, requestSignature, declineTrade, recordTransaction } from '../blockchain/execution.mts';
+import { getUsdcAllowance } from '../blockchain/allowance.mts';
+import { prepareTrade, listTrades, requestSignature, declineTrade, recordTransaction, refreshTrade, prepareAfterApproval, ProposalRefreshRequired } from '../blockchain/execution.mts';
 import { tradeInput } from './tools.mts';
 import { networkName, networkConfig, executionEnabled } from '../blockchain/networks.mts';
 import { policyFor } from '../blockchain/policy.mts';
@@ -45,7 +46,7 @@ createServer(async (req, res) => {
     }
     res.setHeader('Content-Type', 'application/json'); res.setHeader('Cache-Control', 'no-store');
     if (req.method === 'GET' && url.pathname === '/api/agent-status') { res.end(JSON.stringify({ status: initializationFailure ? 'failed' : agentReady ? 'ready' : 'starting', busy, error: initializationFailure })); return; }
-    if (req.method === 'GET' && url.pathname === '/api/config') { res.end(JSON.stringify(['base', 'mainnet', 'sepolia'].map(network => { const c = networkConfig(network), p = policyFor(networkName(network)); return { network, chainId: c.chain.id, name: c.chain.name, explorer: c.explorer, executionEnabled: executionEnabled(c.network), rpcConfigured: Boolean(process.env[c.rpcEnv]), maxTradeUsd: p.maxTradeUsd, maxGasUsd: p.maxGasUsd }; }))); return; }
+    if (req.method === 'GET' && url.pathname === '/api/config') { res.end(JSON.stringify(['base', 'mainnet', 'sepolia'].map(network => { const c = networkConfig(network), p = policyFor(networkName(network)); return { network, chainId: c.chain.id, name: c.chain.name, explorer: c.explorer, executionEnabled: executionEnabled(c.network), rpcConfigured: Boolean(process.env[c.rpcEnv]), maxTradeUsd: p.maxTradeUsd, maxGasUsd: p.maxGasUsd, walletDeadlineSeconds: p.deadlineSeconds }; }))); return; }
     if (req.method === 'GET' && url.pathname === '/api/trades') { res.end(JSON.stringify(await listTrades())); return; }
     if (req.method !== 'POST' || req.headers['x-defi-ui'] !== '1' || (req.headers.origin && ![`http://localhost:${port}`, `http://127.0.0.1:${port}`].includes(req.headers.origin))) { res.writeHead(403).end('{}'); return; }
     let text = ''; for await (const chunk of req) { text += chunk; if (text.length > 20000) throw new Error('Request too large'); }
@@ -85,13 +86,21 @@ createServer(async (req, res) => {
     let result;
     switch (url.pathname) {
       case '/api/swap-preview': result = await calculateSwap(body); break;
+      case '/api/usdc-allowance': result = await getUsdcAllowance(body); break;
       case '/api/portfolio': result = await analyzePortfolio({ wallet: body.wallet, network: networkName(body.network) }); break;
       case '/api/prepare': result = await prepareTrade(tradeInput({ wallet: body.wallet, network: body.network, tokenIn: body.tokenIn, amount: body.amount, slippageBps: body.slippageBps, ...(body.approvalOnly === true ? {approvalOnly:true} : {}) })); break;
       case '/api/signature': result = await requestSignature(body.id, body.wallet); break;
+      case '/api/refresh-proposal': result = await refreshTrade(body.id, body.wallet); break;
+      case '/api/continue-approval': result = await prepareAfterApproval(body.id, body.wallet); break;
       case '/api/decline': result = await declineTrade(body.id); break;
       case '/api/receipt': result = await recordTransaction(body.id, body.hash as Hex); break;
       default: res.writeHead(404).end('{}'); return;
     }
     res.end(JSON.stringify(result));
-  } catch (error) { if (!res.headersSent) res.writeHead(400, { 'Content-Type': 'application/json' }); const message = error instanceof Error && /^(Real-money execution|Execution was disabled|Connected wallet|Proposal expired|Fresh validation|Quote changed|Network, recipient|This proposal|Validation did not pass|Invalid|Unknown input)/.test(error.message) ? error.message : 'Request failed. Check input, proposal status, expiry and RPC availability.'; res.end(JSON.stringify({ error: message })); }
+  } catch (error) {
+    if (error instanceof ProposalRefreshRequired) { res.writeHead(409, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: error.message, code: error.code })); return; }
+    if (!res.headersSent) res.writeHead(400, { 'Content-Type': 'application/json' });
+    const message = error instanceof Error && /^(Real-money execution|Execution was disabled|Connected wallet|Proposal expired|Fresh validation|Quote changed|Network, recipient|This proposal|Validation did not pass|Invalid|Unknown input)/.test(error.message) ? error.message : 'Request failed. Check input, proposal status, expiry and RPC availability.';
+    res.end(JSON.stringify({ error: message }));
+  }
 }).on('error', async () => { await releaseLock(); console.error('Cannot start local server; check port availability and local permissions.'); process.exitCode = 1; }).listen(port, '127.0.0.1', () => console.log(`DeFi Autopilot: http://localhost:${port}`));

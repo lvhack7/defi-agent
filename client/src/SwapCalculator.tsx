@@ -1,15 +1,16 @@
 import { useEffect, useId, useState } from 'react'
 import { TokenIcon } from './TokenIcon'
 import { Icon } from './Icon'
+import { fetchUsdcAllowance, hasUsdcAllowance, type UsdcAllowance } from './usdc-allowance'
 import { fetchSwapPreview, formatSwapAmount, normalizedAmount, swapRequestKey, usableSwapPreview, validSwapAmount, type SwapRequest, type SwapPreviewResult, type SwapToken } from './swap-preview'
 
 type Props = {
-  network: SwapRequest['network']; wallet: string; busy: boolean;
+  network: SwapRequest['network']; wallet: string; busy: boolean; allowanceRevision?: number;
   onReview: (input: SwapRequest) => void; onApproval: (input: SwapRequest) => void;
 }
 const usd = (value: string | null | undefined) => value == null ? '—' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(Number(value))
 
-export function SwapCalculator({ network, wallet, busy, onReview, onApproval }: Props) {
+export function SwapCalculator({ network, wallet, busy, allowanceRevision = 0, onReview, onApproval }: Props) {
   const id = useId()
   const [tokenIn, setTokenIn] = useState<SwapToken>('ETH')
   const [amount, setAmount] = useState('0.001')
@@ -17,6 +18,12 @@ export function SwapCalculator({ network, wallet, busy, onReview, onApproval }: 
   const [refresh, setRefresh] = useState(0)
   const [now, setNow] = useState(Date.now)
   const [state, setState] = useState<{ key: string; loading: boolean; result?: SwapPreviewResult; error?: string }>()
+  const [allowanceState, setAllowanceState] = useState<{ key: string; result?: UsdcAllowance; error?: string }>()
+  const allowanceKey = JSON.stringify([network, wallet.toLowerCase(), allowanceRevision, refresh])
+  const allowance = allowanceState?.key === allowanceKey ? allowanceState : undefined
+  const checkAllowance = tokenIn === 'USDC' && /^0x[\da-fA-F]{40}$/.test(wallet)
+  const checkingAllowance = checkAllowance && !allowance
+  const needsApproval = tokenIn === 'USDC' && !!allowance?.result && !hasUsdcAllowance(allowance.result.rawAllowance, amount)
   const input: SwapRequest = { network, tokenIn, amount, slippageBps }
   const key = swapRequestKey(input)
   const valid = validSwapAmount(amount, tokenIn) && Number.isInteger(slippageBps) && slippageBps >= 0 && slippageBps <= 100
@@ -25,6 +32,16 @@ export function SwapCalculator({ network, wallet, busy, onReview, onApproval }: 
   const usable = usableSwapPreview(state, input, now)
   const loading = valid && (!matching || matching.loading)
   const tokenOut: SwapToken = tokenIn === 'ETH' ? 'USDC' : 'ETH'
+
+  useEffect(() => {
+    if (!checkAllowance) return
+    const controller = new AbortController()
+    let active = true
+    fetchUsdcAllowance(network, wallet, AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]))
+      .then(result => { if (active) setAllowanceState({ key: allowanceKey, result }) })
+      .catch(() => { if (active) setAllowanceState({ key: allowanceKey, error: 'Could not check USDC approval. Review will check again.' }) })
+    return () => { active = false; controller.abort() }
+  }, [allowanceKey, checkAllowance, network, wallet])
 
   useEffect(() => {
     if (!valid) return
@@ -59,7 +76,8 @@ export function SwapCalculator({ network, wallet, busy, onReview, onApproval }: 
 
   return <div className="swap-calculator">
     <div className="swap-quote-header"><span>Uniswap V3</span><button type="button" className="secondary quote-refresh" aria-label="Refresh swap quote" disabled={busy || loading || !valid} onClick={() => { setState({ key, loading: true }); setRefresh(value => value + 1) }}><Icon name="refresh"/></button></div>
-    <form className="swap-calculator-form" onSubmit={event => { event.preventDefault(); if (usable && wallet && !busy) onReview({ ...input, amount: normalizedAmount(amount) }) }}>
+    {tokenIn === 'USDC' && <div className="usdc-swap-steps" aria-label="USDC swap steps"><span className={allowance?.result && !needsApproval ? 'complete' : ''}>{allowance?.result && !needsApproval ? <Icon name="check"/> : <b>1</b>} Approve USDC</span><Icon name="arrow"/><span><b>2</b> Review & swap</span></div>}
+    <form className="swap-calculator-form" onSubmit={event => { event.preventDefault(); if (usable && wallet && !busy && !checkingAllowance) (needsApproval ? onApproval : onReview)({ ...input, amount: normalizedAmount(amount) }) }}>
       <div className="swap-asset-box">
         <label htmlFor={id + '-amount'}>You pay</label>
         <div className="swap-asset-row"><input id={id + '-amount'} aria-label="Swap input amount" inputMode="decimal" autoComplete="off" value={amount} disabled={busy} onChange={event => setAmount(event.target.value)} placeholder="0.00"/><div className="swap-token-picker"><TokenIcon token={tokenIn}/><select aria-label="Swap input token" value={tokenIn} disabled={busy} onChange={event => { setTokenIn(event.target.value as SwapToken); setAmount('') }}><option>ETH</option><option>USDC</option></select></div></div>
@@ -84,8 +102,8 @@ export function SwapCalculator({ network, wallet, busy, onReview, onApproval }: 
       </>}
       {!valid && <p className="swap-hint">Enter a positive {tokenIn} amount and slippage between 0 and 100 bps.</p>}
       {(matching?.error || matching?.result?.status === 'unavailable') && <p className="swap-hint fail" role="alert">{matching.error ?? (matching.result?.status === 'unavailable' ? matching.result.message : '')}</p>}
-      <button className="swap-review" disabled={busy || !usable || !wallet}>{busy ? 'Working…' : !wallet ? 'Connect wallet to review' : 'Review swap'}</button>
-      {tokenIn === 'USDC' && <button type="button" className="secondary swap-allowance" disabled={busy || !usable || !wallet} onClick={() => onApproval({ ...input, amount: normalizedAmount(amount) })}>Prepare USDC approval</button>}
+      {tokenIn === 'USDC' && <p className="swap-hint" role="status">{checkingAllowance ? 'Checking USDC approval…' : allowance?.error ?? (needsApproval ? `${allowance?.result?.allowance} USDC approved. Approve this amount first, then confirm a separate swap.` : allowance?.result ? `${allowance.result.allowance} USDC already approved. Continue to the swap.` : 'USDC needs a spending approval before its first swap.')}</p>}
+      <button className="swap-review" disabled={busy || !usable || !wallet || checkingAllowance}>{busy ? 'Working…' : !wallet ? 'Connect wallet to review' : checkingAllowance ? 'Checking approval…' : needsApproval ? 'Review USDC approval' : 'Review swap'}</button>
     </form>
   </div>
 }

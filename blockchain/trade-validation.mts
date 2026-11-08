@@ -1,4 +1,4 @@
-import { createPublicClient, http, parseAbi, encodeFunctionData, decodeFunctionResult, parseUnits, formatUnits, isAddress, getAddress, type Hex } from 'viem';
+import { createPublicClient, http, parseAbi, encodeFunctionData, decodeFunctionResult, parseUnits, formatUnits, isAddress, getAddress, type Hex, type Address } from 'viem';
 import { readBaseFeeComponents } from './base-fees.mts';
 import { validationFailure } from './validation-errors.mts';
 import { networkConfig, networkName, rpcFor } from './networks.mts';
@@ -8,7 +8,8 @@ import { quoteSwap } from './uniswap.mts';
 import { getPricing, pricingFresh } from './prices.mts';
 const routerAbi = parseAbi(['function allowance(address owner,address spender) view returns (uint256)', 'function approve(address spender,uint256 amount) returns (bool)', 'function exactInputSingle((address tokenIn,address tokenOut,uint24 fee,address recipient,uint256 amountIn,uint256 amountOutMinimum,uint160 sqrtPriceLimitX96) params) payable returns (uint256 amountOut)', 'function multicall(uint256 deadline,bytes[] data) payable returns (bytes[] results)', 'function unwrapWETH9(uint256 amountMinimum,address recipient) payable', 'function refundETH() payable']);
 export type Check = { name: string; passed: boolean; explanation: string };
-export async function validateTrade(input: unknown, approvalOnly = false) {
+export type ReviewedTerms = { pool: Address; feeTier: number; minimumOut: string };
+export async function validateTrade(input: unknown, approvalOnly = false, reviewed?: ReviewedTerms) {
   const checks: Check[] = [];
   const add = (name: string, passed: boolean, explanation: string) => checks.push({ name, passed, explanation });
   const reject = (message: string) => ({ status: 'rejected' as const, executionEnabled: false, checks, message });
@@ -40,13 +41,20 @@ export async function validateTrade(input: unknown, approvalOnly = false) {
     const ethRaw = BigInt(portfolio.native.rawBalance), usdcRaw = BigInt(usdcBalance.rawBalance);
     if ((reverse ? usdcRaw : ethRaw) < amount) return reject('Insufficient input balance');
     stage = 'quote';
-    const quote = await quoteSwap({ network, tokenIn, amount: amountText });
+    const quote = await quoteSwap({ network, tokenIn, amount: amountText }, undefined, reviewed);
     if (quote.status !== 'quoted' || quote.amountOut === undefined || quote.feeTier === undefined || !quote.quotedAt) return reject('Quote unavailable');
     stage = 'pricing';
     const pricing = await getPricing(network, quote.pool), price = parseUnits(pricing.usdcPerEth, 8);
     const ethUsd = pricing.ethUsd ? parseUnits(pricing.ethUsd, 8) : 0n, usdcUsd = pricing.usdcUsd ? parseUnits(pricing.usdcUsd, 8) : 0n;
-    const amountOut = parseUnits(quote.amountOut, reverse ? 18 : 6), minOut = amountOut * BigInt(10000 - (v.slippageBps as number)) / 10000n;
+    const amountOut = parseUnits(quote.amountOut, reverse ? 18 : 6);
+    // At signing, retain the exact minimum the user reviewed. Never replace it
+    // with a newly calculated (possibly lower) slippage floor.
+    const minOut = reviewed ? parseUnits(reviewed.minimumOut, reverse ? 18 : 6) : amountOut * BigInt(10000 - (v.slippageBps as number)) / 10000n;
     if (amountOut <= 0n || minOut <= 0n) return reject('Invalid minimum output');
+    if (reviewed && !approvalOnly) {
+      add('reviewed_minimum', amountOut >= minOut, `Current output must cover the reviewed minimum ${reviewed.minimumOut} ${reverse ? 'ETH' : 'USDC'}`);
+      if (amountOut < minOut) return reject('Current quote is below the reviewed minimum; a new review is required.');
+    }
     const inputUsd = reverse ? amount * usdcUsd / 1000000n : amount * ethUsd / 10n ** 18n;
     add('trade_limit', network === 'sepolia' || inputUsd <= parseUnits(policy.maxTradeUsd, 8), network === 'sepolia' ? 'No real-money notional limit on testnet' : `Input value ${formatUnits(inputUsd, 8)} USD; limit ${policy.maxTradeUsd} USD`);
     const implied = reverse ? amount * 100000000n * 10n ** 18n / (amountOut * 1000000n) : amountOut * 100000000n * 10n ** 18n / (amount * 1000000n);
@@ -61,7 +69,8 @@ export async function validateTrade(input: unknown, approvalOnly = false) {
       return ev + uv === 0n ? null : { ethValue: ev, totalValue: ev + uv };
     };
     const allocation = (received: bigint, gas: bigint) => { const values = allocationValues(received, gas); return values ? Number(values.ethValue * 1000000n / values.totalValue) / 10000 : null; };
-    const deadline = BigInt(Math.floor((Date.parse(quote.quotedAt) + policy.maxQuoteAgeMs) / 1000));
+    const quoteExpiry = Date.parse(quote.quotedAt) + policy.maxQuoteAgeMs;
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + policy.deadlineSeconds);
     const swap = encodeFunctionData({ abi: routerAbi, functionName: 'exactInputSingle', args: [{ tokenIn: reverse ? usdc : weth, tokenOut: reverse ? weth : usdc, fee: quote.feeTier, recipient: reverse ? router : wallet, amountIn: amount, amountOutMinimum: minOut, sqrtPriceLimitX96: 0n }] });
     const finish = reverse ? encodeFunctionData({ abi: routerAbi, functionName: 'unwrapWETH9', args: [minOut, wallet] }) : encodeFunctionData({ abi: routerAbi, functionName: 'refundETH' });
     const data = approvalOnly ? encodeFunctionData({ abi: routerAbi, functionName: 'approve', args: [router, amount] }) : encodeFunctionData({ abi: routerAbi, functionName: 'multicall', args: [deadline, [swap, finish]] });
@@ -69,11 +78,15 @@ export async function validateTrade(input: unknown, approvalOnly = false) {
     if (reverse && !approvalOnly) {
       stage = 'allowance';
       const allowance = await client.readContract({ address: usdc, abi: routerAbi, functionName: 'allowance', args: [wallet, router] });
-      if (allowance < amount) { add('allowance', false, 'Exact-amount USDC allowance required before swap simulation'); return { ...reject('USDC allowance required'), approvalRequired: true }; }
+      add('allowance', allowance >= amount, `${formatUnits(allowance, 6)} USDC approved; ${amountText} USDC required for this router`);
+      if (allowance < amount) return { ...reject('USDC allowance required before the separate swap transaction'), approvalRequired: true };
     }
     const tx = { account: wallet, to, data, value } as const;
     stage = 'simulation_and_gas';
-    const [simulation, estimate, fees] = await Promise.all([client.call(tx), client.estimateGas(tx), client.estimateFeesPerGas()]);
+    // Compare the router and quoter at the same state snapshot. Using `latest`
+    // here spuriously rejects quotes when another swap lands between RPC calls.
+    // Gas estimation still runs against current state and must also succeed.
+    const [simulation, estimate, fees] = await Promise.all([client.call({ ...tx, blockNumber: BigInt(quote.blockNumber) }), client.estimateGas(tx), client.estimateFeesPerGas()]);
     if (!simulation.data) return reject('Empty simulation result');
     if (approvalOnly) add('simulation', decodeFunctionResult({ abi: routerAbi, functionName: 'approve', data: simulation.data }) === true, 'Exact-amount USDC approval simulation');
     else {
@@ -96,15 +109,16 @@ export async function validateTrade(input: unknown, approvalOnly = false) {
     const gasUsd = gasBudget * ethUsd / 10n ** 18n;
     add('gas_limit', network === 'sepolia' || gasUsd <= parseUnits(policy.maxGasUsd, 8), network === 'sepolia' ? 'Testnet gas estimate only' : `Estimated gas budget ${formatUnits(gasUsd, 8)} USD; limit ${policy.maxGasUsd} USD`);
     const percentages = [allocation(amountOut, 0n), allocation(minOut, 0n), allocation(amountOut, gasBudget), allocation(minOut, gasBudget)];
-    add('post_swap_balances', [allocationValues(amountOut, 0n), allocationValues(minOut, 0n), allocationValues(amountOut, gasBudget), allocationValues(minOut, gasBudget)].every(Boolean), 'Quoted and minimum-output balances must remain non-negative after estimated gas; allocation is informational');
+    if (approvalOnly) add('post_approval_balances', ethRaw >= gasBudget, 'Approval spends gas only; USDC is not exchanged for ETH');
+    else add('post_swap_balances', [allocationValues(amountOut, 0n), allocationValues(minOut, 0n), allocationValues(amountOut, gasBudget), allocationValues(minOut, gasBudget)].every(Boolean), 'Quoted and minimum-output balances must remain non-negative after estimated gas; allocation is informational');
     stage = 'freshness';
     const block = await client.getBlockNumber({ cacheTime: 0 }), quoteBlock = BigInt(quote.blockNumber);
     const age = Date.now() - Date.parse(quote.quotedAt);
     const priceBlock = pricing.blockNumber ? BigInt(pricing.blockNumber) : undefined;
-    add('freshness', age >= 0 && Date.now() < Number(deadline) * 1000 && block >= quoteBlock && block - quoteBlock <= policy.maxQuoteBlocks && pricingFresh(pricing) && (priceBlock === undefined || block >= priceBlock && block - priceBlock <= policy.maxQuoteBlocks), 'Quote, block and valuation price freshness checks');
+    add('freshness', age >= 0 && Date.now() < quoteExpiry && block >= quoteBlock && block - quoteBlock <= policy.maxQuoteBlocks && pricingFresh(pricing) && (priceBlock === undefined || block >= priceBlock && block - priceBlock <= policy.maxQuoteBlocks), 'Quote, block and valuation price freshness checks');
     add('scope_and_addresses', true, `Chain ${chain.id}; WETH ${weth}; native USDC ${usdc}; router ${router}; recipient ${wallet}`);
     const passed = checks.every(c => c.passed);
-    return { status: passed ? 'approved' as const : 'rejected' as const, executionEnabled: passed && policy.executionEnabled, requiresWalletApproval: true, network, checks, balancesBefore: portfolio, quote, pricing, minimumOut: formatUnits(minOut, reverse ? 18 : 6), kind: approvalOnly ? 'usdc_approval' : 'swap', gasEstimate: { gas: gas.toString(), maxFeePerGas: maxFeePerGas.toString(), totalBudgetWei: gasBudget.toString(), totalBudgetEth: formatUnits(gasBudget, 18), totalBudgetUsd: network === 'sepolia' ? null : formatUnits(gasUsd, 8), includesBaseL1DataFee: network === 'base' }, economics: { quotedEthPercent: percentages[0], quotedUsdcPercent: percentages[0] === null ? null : 100 - percentages[0] }, ...(passed ? { transaction: { chainId: chain.id, from: wallet, to, data, value: `0x${value.toString(16)}`, gas: `0x${gas.toString(16)}`, maxFeePerGas: `0x${maxFeePerGas.toString(16)}`, maxPriorityFeePerGas: `0x${priority.toString(16)}`, expiresAt: Number(deadline) * 1000 } } : {}), message: passed && !policy.executionEnabled ? 'Validation passed; real-money execution is locked in backend configuration.' : 'Manual wallet approval required for each transaction.' };
+    return { status: passed ? 'approved' as const : 'rejected' as const, executionEnabled: passed && policy.executionEnabled, requiresWalletApproval: true, network, checks, balancesBefore: portfolio, quote, pricing, minimumOut: formatUnits(minOut, reverse ? 18 : 6), kind: approvalOnly ? 'usdc_approval' : 'swap', gasEstimate: { gas: gas.toString(), maxFeePerGas: maxFeePerGas.toString(), totalBudgetWei: gasBudget.toString(), totalBudgetEth: formatUnits(gasBudget, 18), totalBudgetUsd: network === 'sepolia' ? null : formatUnits(gasUsd, 8), includesBaseL1DataFee: network === 'base' }, economics: { quotedEthPercent: percentages[0], quotedUsdcPercent: percentages[0] === null ? null : 100 - percentages[0] }, ...(passed ? { transaction: { chainId: chain.id, from: wallet, to, data, value: `0x${value.toString(16)}`, gas: `0x${gas.toString(16)}`, maxFeePerGas: `0x${maxFeePerGas.toString(16)}`, maxPriorityFeePerGas: `0x${priority.toString(16)}`, expiresAt: Number(deadline) * 1000 } } : {}), message: !passed ? 'Validation rejected; review the failed checks.' : (policy.executionEnabled ? 'Manual wallet approval required for each transaction.' : 'Validation passed; real-money execution is locked in backend configuration.') + (approvalOnly ? ' USDC spending approval only. No swap occurs; after confirmation, prepare and sign a separate USDC-to-ETH swap.' : '') };
   } catch (error) {
     const failure = validationFailure(error, stage);
     const detail = `${failure.stage}: ${failure.type}${failure.code !== undefined ? `; RPC ${failure.code}` : ''}${failure.httpStatus !== undefined ? `; HTTP ${failure.httpStatus}` : ''}`;

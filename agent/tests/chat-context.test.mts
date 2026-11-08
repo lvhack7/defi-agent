@@ -62,6 +62,7 @@ test('disconnected turns reject stale wallet inputs instead of using the previou
 
 test('network-only tools and unscoped tools receive only their supported fields', () => {
   assert.deepEqual(toolInputWithContext('quote_swap', { amount: '1', tokenIn: 'ETH' }, context), { network: 'base', amount: '1', tokenIn: 'ETH' });
+  assert.deepEqual(toolInputWithContext('calculate_swap', { amount: '1', tokenIn: 'USDC' }, context), { network: 'base', amount: '1', tokenIn: 'USDC' });
   assert.deepEqual(toolInputWithContext('get_trade_status', { id: 'proposal' }, context), { id: 'proposal' });
   assert.deepEqual(toolInputWithContext('portfolio_capabilities', {}, context), {});
 });

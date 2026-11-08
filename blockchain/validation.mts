@@ -1,5 +1,6 @@
 import { parseUnits, formatUnits } from 'viem';
 import { validateTrade } from './trade-validation.mts';
+import type { ReviewedTerms } from './trade-validation.mts';
 export { POLICY } from './policy.mts';
 type Snapshot = { ethRaw: bigint; usdcRaw: bigint; usdcPerEth: string };
 export function assessEconomics(snapshot: Snapshot, amountIn: bigint, amountOut: bigint, minimumOut: bigint) {
@@ -21,4 +22,4 @@ export function assessEconomics(snapshot: Snapshot, amountIn: bigint, amountOut:
   return { impliedUsdcPerEth: formatUnits(impliedPriceScaled, 8), deviationPercent: deviationBps / 100, quotedEthPercent, quotedUsdcPercent: 100 - quotedEthPercent, minimumEthPercent, minimumUsdcPercent: 100 - minimumEthPercent };
 }
 
-export const validateSwap = (input: unknown) => validateTrade(input);
+export const validateSwap = (input: unknown, reviewed?: ReviewedTerms) => validateTrade(input, false, reviewed);

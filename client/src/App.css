@@ -1,5 +1,7 @@
 .shell { display: flex; min-height: 100vh; }
 .icon { width: 19px; height: 19px; flex-shrink: 0; }
+.brand-accent { color: var(--blue); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 .token-icon { display: block; width: 36px; height: 36px; flex-shrink: 0; }
 .metric-heading.token-heading { justify-content: flex-start; gap: 10px; }
 .metric-heading.token-heading p { font-size: 13px; font-weight: 700; color: #354762; }
@@ -45,6 +47,16 @@
 .swap-hint.fail { color: #be4554; }
 .swap-review { width: 100%; margin-top: 5px; }
 .swap-allowance { margin-top: 10px; }
+.usdc-swap-steps { display: flex; gap: 12px; align-items: center; margin: 6px 0 18px; color: #7c899f; font-size: 10px; }
+.usdc-swap-steps > span { display: flex; align-items: center; gap: 6px; }
+.usdc-swap-steps b, .usdc-swap-steps > span > .icon { width: 20px; height: 20px; display: grid; place-items: center; padding: 3px; background: #edf3ff; border-radius: 50%; color: var(--blue); font-weight: 500; }
+.usdc-swap-steps > .icon { width: 12px; height: 12px; color: #b3bfd2; }
+.usdc-swap-steps > .complete { color: #168263; }
+.usdc-swap-steps > .complete > .icon { color: #168263; background: #edfaf5; }
+.approval-explanation { font-size: 12px; line-height: 1.7; color: #526c92; }
+.approval-next-step { background: #f0f5ff; border: 1px solid #dde8ff; padding: 14px; border-radius: 10px; margin-top: 16px; }
+.approval-next-step p { font-size: 12px; line-height: 1.7; margin: 0; color: #42618e; }
+.approval-next-step button { font-size: 11px; }
 @media (max-width: 450px) {
   .swap-asset-box { padding: 15px; }
   .swap-asset-row { gap: 8px; }
@@ -151,6 +163,9 @@ details > p { margin: 10px 0; }
 .trade .panel-title h3 { overflow-wrap: anywhere; }
 .trade button, .trade a { margin-top: 14px; }
 .trade form { margin-top: 16px; }
+.trade-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.proposal-notice { padding: 14px 16px; background: #edf3ff; color: #3159b3; border: 1px solid #dce6ff; border-radius: 10px; font-size: 12px; line-height: 1.7; }
+.panel-title > .badge.superseded { background: #f1f3f7; border-color: #e5e9f0; color: #7b8799; }
 .trade form button { margin-top: 0; }
 .trade a { display: inline-block; color: var(--blue); font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
 .panel-title > .badge { flex-shrink: 0; text-transform: capitalize; font-size: 10px; letter-spacing: 0; color: #315be0; background: #edf3ff; border-color: #dfe9ff; }
@@ -232,4 +247,132 @@ details > p { margin: 10px 0; }
   .metrics strong { font-size: 23px; }
   .metric-heading { gap: 5px; }
   .metric-heading p { font-size: 11px; }
+}
+
+/* Dashboard workspace */
+.shell { background: #f6f8fc; }
+.shell aside { padding-top: 30px; }
+.shell .brand { gap: 9px; margin-inline: 6px; margin-bottom: 48px; }
+.shell .brand-name { font-size: 15px; letter-spacing: -.7px; }
+.shell .brand-mark { width: 33px; height: 36px; border-radius: 11px; }
+.shell .brand-mark .icon { width: 22px; height: 22px; }
+.shell .nav { font-size: 12px; border-radius: 11px; padding: 13px 14px; margin-bottom: 9px; }
+.nav-agent-badge { margin-left: auto; font-size: 8px; font-weight: 600; border: 1px solid #e1e8fa; border-radius: 5px; color: #7390cb; background: #f8faff; padding: 3px 5px; }
+.shell .sidebar-bottom { display: flex; align-items: center; gap: 10px; padding: 13px; border-color: #edf0f8; background: #fbfcff; }
+.sidebar-bottom .crypto-icon, .sidebar-bottom .token-icon { width: 26px; height: 26px; }
+.sidebar-bottom small { display: block; color: #97a3b5; font-weight: 400; font-size: 9px; margin-top: 5px; }
+.dashboard-kicker { display: block; color: #93a1b8; letter-spacing: 1.7px; font-size: 8px; font-weight: 600; margin-bottom: 10px; }
+.dashboard-heading h1 { font-size: 30px; letter-spacing: -1.2px; margin-bottom: 0; }
+.shell > main { padding: 34px 32px 16px; }
+.shell main > header { margin-bottom: 28px; }
+.shell .network-notice { padding: 10px 14px; background: #fff; border-radius: 12px; }
+.network-picker { display: flex; gap: 10px; align-items: center; }
+.network-picker .crypto-icon, .network-picker .token-icon { width: 27px; height: 27px; }
+.shell .network-picker label { width: 200px; }
+.network-picker select { border: 0; min-height: 38px; font-size: 12px; padding: 7px 10px 7px 0; font-weight: 600; background: transparent; }
+.shell .wallet-bar { margin: 22px 0; gap: 12px; }
+.shell .wallet-bar > label { font-size: 10px; gap: 8px; }
+.shell .wallet-bar input { background: #fff; border-color: #e3e9f4; }
+.shell .metrics { gap: 16px; margin-bottom: 20px; }
+.shell .metrics article { padding: 22px; border-color: #e7ecf5; }
+.shell .metrics article:first-child { background: linear-gradient(115deg, #2155f5, #386dff); border-color: #2155f5; }
+.shell .metrics article:first-child::after { width: 230px; height: 230px; right: -110px; top: -65px; border-width: 37px; }
+.shell .metric-heading { margin-bottom: 19px; }
+.shell .metric-heading.token-heading .token-icon { height: 32px; width: 32px; }
+.shell .metrics strong { font-size: clamp(24px, 2.3vw, 32px); line-height: 1.3; letter-spacing: -1px; }
+.metric-caption { display: block; font-size: 10px; color: #97a3b6; margin-top: 10px; }
+.metrics article:first-child .metric-caption { color: #bcd0ff; }
+.shell .panel { border-color: #e7ecf5; padding: 23px; }
+.shell .two-col { gap: 20px; }
+.shell .panel-title { margin-bottom: 21px; }
+.shell .panel-title h2 { font-size: 15px; font-weight: 700; }
+.shell .allocation { gap: 24px; padding-top: 0; }
+.shell .donut { width: 124px; height: 124px; }
+.shell .donut > div { width: 102px; height: 102px; }
+.shell .donut strong { font-size: 22px; }
+.shell .market-panel .price { font-size: 32px; margin-top: 16px; }
+.shell .market-panel .token-icon { width: 25px; height: 25px; }
+.workspace-grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); align-items: start; gap: 20px; }
+.section-icon-title { display: flex; align-items: center; gap: 9px; }
+.section-icon { display: grid; place-items: center; width: 29px; height: 29px; background: #f0f4ff; color: var(--blue); border-radius: 8px; }
+.section-icon .icon { width: 16px; height: 16px; }
+.workspace-grid .agent-panel { position: sticky; top: 22px; }
+.shell .chat { min-height: 354px; max-height: 550px; margin-bottom: 20px; }
+.shell .chat-empty { padding: 28px 15px 10px; border: 0; background: transparent; }
+.chat-empty-mark { display: grid; place-items: center; width: 54px; height: 54px; margin: 0 auto 22px; color: var(--blue); background: #edf3ff; border: 6px solid #f8faff; border-radius: 17px; }
+.chat-empty-mark .icon { width: 25px; height: 25px; }
+.chat-empty h3 { font-size: 17px; font-weight: 700; letter-spacing: -.5px; margin-bottom: 9px; }
+.chat-empty > p { font-size: 11px; font-weight: 400; color: #92a0b5; line-height: 1.8; }
+.prompt-suggestions { display: grid; gap: 8px; margin: 23px auto 0; width: min(310px, 100%); }
+.prompt-suggestions button { justify-content: space-between; text-align: left; font-size: 11px; font-weight: 400; min-height: 38px; padding: 10px 12px; border-color: #e7ecf5; }
+.prompt-suggestions .icon { width: 12px; height: 12px; color: #a4b4d2; }
+.shell .agent-composer { border: 1px solid #e2e9f5; border-radius: 12px; padding: 5px; align-items: center; gap: 4px; flex-wrap: nowrap; background: #fbfcff; }
+.shell .agent-composer input { background: transparent; border: 0; font-size: 12px; min-height: 37px; padding-inline: 10px; box-shadow: none; }
+.shell .agent-composer:focus-within { border-color: #96b3ff; box-shadow: 0 0 0 3px #2155f508; }
+.shell .agent-composer button { min-height: 35px; width: 36px; min-width: 36px; padding: 8px; border-radius: 8px; }
+.agent-composer button .icon { width: 17px; height: 17px; }
+.shell .chat-row { font-size: 12px; padding: 14px 16px; }
+.shell .chat-row small { font-size: 8px; }
+.panel-title > .protocol-label { display: flex; align-items: center; gap: 5px; font-size: 9px; margin-left: auto; text-transform: none; font-weight: 400; letter-spacing: 0; background: transparent; border: 0; padding: 0; }
+.protocol-label .crypto-icon { width: 18px; height: 18px; }
+.refresh-trades.secondary { width: 29px; min-height: 29px; padding: 5px; border-color: #e9edf5; border-radius: 7px; }
+.refresh-trades .icon { width: 13px; height: 13px; }
+.workspace-grid .swap-calculator { margin-bottom: 18px; }
+.workspace-grid .swap-asset-box { padding: 17px; }
+.workspace-grid .swap-asset-row { gap: 10px; }
+.workspace-grid .swap-asset-row > input, .workspace-grid .swap-asset-row > output { font-size: 27px; }
+.dashboard-footer { border-top: 1px solid #e7ecf5; display: flex; align-items: center; justify-content: space-between; gap: 20px; color: #9aa6b8; font-size: 9px; padding: 17px 0 5px; }
+.dashboard-footer > span:last-child { display: flex; align-items: center; gap: 5px; }
+.dashboard-footer .icon { height: 11px; width: 11px; }
+@media (min-width: 1800px) { .shell > main { padding-inline: 50px; } }
+@media (max-width: 1250px) {
+  .shell > main { padding-inline: 24px; }
+  .workspace-grid { grid-template-columns: 1fr; gap: 0; }
+  .workspace-grid .agent-panel { position: static; }
+  .shell .chat { min-height: 270px; }
+  .shell .chat-empty { padding-top: 14px; }
+  .prompt-suggestions { display: flex; flex-wrap: wrap; justify-content: center; width: 100%; }
+  .prompt-suggestions button { gap: 15px; }
+}
+@media (max-width: 1000px) {
+  .shell .two-col { gap: 0; }
+  .shell .metrics { gap: 12px; }
+  .shell .metrics article { padding: 18px; }
+  .shell .metrics strong { font-size: 24px; }
+}
+@media (max-width: 760px) {
+  .shell aside { padding: 18px 20px 9px; }
+  .shell .brand { margin: 0 0 18px; }
+  .shell .nav { display: inline-flex; padding: 9px 12px; margin: 0 6px 5px 0; font-size: 11px; gap: 7px; }
+  .nav-agent-badge { display: none; }
+  .shell .sidebar-bottom { display: none; }
+  .shell > main { padding: 25px 20px 14px; }
+  .shell main > header { gap: 18px; }
+  .dashboard-heading h1 { font-size: 28px; }
+  .shell .network-notice { flex-direction: row; padding: 10px; gap: 8px; flex-wrap: wrap; }
+  .shell .network-picker { gap: 8px; }
+  .shell .network-picker label { width: 170px; }
+  .network-picker .crypto-icon, .network-picker .token-icon { width: 24px; height: 24px; }
+  .network-picker select { font-size: 11px; }
+  .shell .execution-status { font-size: 9px; padding: 7px 8px; }
+  .shell .wallet-bar { margin-block: 19px; }
+  .shell .panel { padding: 19px; }
+  .shell .metrics article:first-child strong { font-size: 32px; }
+  .shell .metrics strong { font-size: 26px; }
+  .shell .metric-heading.token-heading { gap: 8px; }
+  .shell .metric-heading.token-heading .token-icon { width: 28px; height: 28px; }
+  .shell .metric-heading.token-heading p { font-size: 12px; }
+  .shell .agent-composer input { flex-basis: auto; }
+  .shell .agent-composer button { width: 36px; }
+  .shell .chat { min-height: 315px; }
+  .prompt-suggestions { display: grid; max-width: 310px; }
+  .dashboard-footer { flex-wrap: wrap; gap: 10px; }
+}
+@media (max-width: 400px) {
+  .shell aside { padding-inline: 16px; }
+  .shell > main { padding-inline: 16px; }
+  .shell .metrics strong { font-size: 23px; }
+  .shell .metrics article { padding: 16px; }
+  .workspace-grid .swap-asset-box { padding: 14px; }
+  .workspace-grid .swap-asset-row > input, .workspace-grid .swap-asset-row > output { font-size: 23px; }
 }

@@ -6,6 +6,7 @@ import { parseAbi, decodeFunctionData, encodeFunctionResult, encodeEventTopics, 
 import { networkConfig, networkFromChainId, executionEnabled } from './networks.mts';
 import { getCoinGeckoPrices } from './prices.mts';
 import { analyzePortfolio } from './valuation.mts';
+import { calculateSwap } from './swap-calculator.mts';
 import { validateTrade } from './trade-validation.mts';
 import { prepareTrade, requestSignature, recordTransaction } from './execution.mts';
 const wallet = '0x4259e3c12Bc0ceB7345E38F88809a02Ff83cF502';
@@ -97,6 +98,11 @@ test('Base quote/validation uses native addresses, L1 fees, risk limits and a lo
   try {
     const valuation=await analyzePortfolio({wallet,network:'base'});
     assert.equal(valuation.valuation?.currency,'USD');assert.equal(valuation.valuation?.total,'10');
+    const calculation=await calculateSwap({network:'base',tokenIn:'ETH',amount:'0.003',slippageBps:50});
+    assert.equal(calculation.status,'quoted');
+    assert.ok('minimumOut' in calculation && calculation.minimumOut==='5.97');
+    assert.ok('rate' in calculation && calculation.rate.amountOut==='2000');
+    assert.ok(!('transaction' in calculation));
     const input={wallet,network:'base',amountEth:'0.003',slippageBps:50};
     const validation=await validateTrade(input);
     assert.equal(validation.status,'approved',JSON.stringify(validation.checks));
